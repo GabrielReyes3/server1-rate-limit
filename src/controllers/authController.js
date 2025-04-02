@@ -95,14 +95,18 @@ exports.register = async (req, res) => {
 
 // 🔹 Login con JWT y MFA
 exports.login = async (req, res) => {
-    const { email, password, token, useMFA } = req.body; // 'useMFA' indica si se utilizará MFA
+    const { email, password, token, useMFA } = req.body;
 
     if (!email || (!password && !useMFA)) {
         return res.status(400).json({ msg: 'Faltan datos en la solicitud' });
     }
 
     try {
-        // Buscar usuario en Firestore
+        // Verificar que la colección existe
+        if (!usersCollection) {
+            return res.status(500).json({ msg: 'Error en la configuración de la base de datos' });
+        }
+
         const userSnapshot = await usersCollection.where('email', '==', email).get();
         if (userSnapshot.empty) {
             return res.status(400).json({ msg: 'Credenciales inválidas' });
@@ -111,21 +115,22 @@ exports.login = async (req, res) => {
         const userDoc = userSnapshot.docs[0];
         const userData = userDoc.data();
 
-        // Si no se usa MFA, se valida con la contraseña
         if (!useMFA) {
+            if (!userData.password) {
+                return res.status(400).json({ msg: 'Credenciales inválidas' });
+            }
+
             const validPassword = await bcrypt.compare(password, userData.password);
             if (!validPassword) {
                 return res.status(400).json({ msg: 'Credenciales inválidas' });
             }
         }
 
-        // Verificar si el mfaSecret está presente, solo si se requiere MFA
-        if (useMFA && !userData.mfaSecret) {
-            return res.status(400).json({ msg: 'MFA no configurado' });
-        }
-
-        // Verificar el código MFA (OTP), solo si se requiere MFA
         if (useMFA) {
+            if (!userData.mfaSecret || typeof userData.mfaSecret !== 'string') {
+                return res.status(400).json({ msg: 'MFA no configurado correctamente' });
+            }
+
             const verified = speakeasy.totp.verify({
                 secret: userData.mfaSecret,
                 encoding: 'base32',
@@ -137,7 +142,10 @@ exports.login = async (req, res) => {
             }
         }
 
-        // Generar JWT
+        if (!process.env.JWT_SECRET) {
+            return res.status(500).json({ msg: 'Error en configuración del servidor' });
+        }
+
         const tokenJWT = jwt.sign({ email, username: userData.username }, process.env.JWT_SECRET, {
             expiresIn: '1h',
         });
@@ -147,11 +155,12 @@ exports.login = async (req, res) => {
             token: tokenJWT,
         });
     } catch (error) {
-        console.error('Error al iniciar sesión:', error.message);
+        console.error('Error al iniciar sesión:', error);
         res.status(500).json({
             msg: 'Error en el servidor',
             error: error.message,
         });
     }
 };
+
 

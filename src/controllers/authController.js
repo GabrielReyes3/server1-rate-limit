@@ -93,65 +93,65 @@ exports.register = async (req, res) => {
     }
 };
 
-// 🔹 Login con JWT y MFA
+// 🔹 Login de usuario con contraseña o MFA
 exports.login = async (req, res) => {
-    const { email, password, token, useMFA } = req.body; // 'useMFA' indica si se utilizará MFA
-
-    if (!email || (!password && !useMFA)) {
-        return res.status(400).json({ msg: 'Faltan datos en la solicitud' });
+    // Validar errores de los datos enviados
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+        return res.status(400).json({ errors: errors.array() });
     }
 
+    const { email, password, token, useMFA } = req.body;
+    
+    if (!email) {
+        return res.status(400).json({ msg: 'El email es obligatorio' });
+    }
+    
+    const normalizedEmail = email.toLowerCase();
+
     try {
-        // Buscar usuario en Firestore
-        const userSnapshot = await usersCollection.where('email', '==', email).get();
-        if (userSnapshot.empty) {
-            return res.status(400).json({ msg: 'Credenciales inválidas' });
+        // Buscar usuario por email
+        const userSnapshot = await usersCollection.doc(normalizedEmail).get();
+        if (!userSnapshot.exists) {
+            return res.status(400).json({ msg: 'Usuario no encontrado' });
         }
 
-        const userDoc = userSnapshot.docs[0];
-        const userData = userDoc.data();
+        const userData = userSnapshot.data();
 
-        // Si no se usa MFA, se valida con la contraseña
-        if (!useMFA) {
+        if (useMFA) {
+            // Validar código MFA
+            if (!userData.mfaSecret) {
+                return res.status(400).json({ msg: 'MFA no configurado para este usuario' });
+            }
+            const verified = speakeasy.totp.verify({
+                secret: userData.mfaSecret,
+                encoding: 'base32',
+                token,
+            });
+            if (!verified) {
+                return res.status(400).json({ msg: 'Código MFA incorrecto' });
+            }
+        } else {
+            // Validar contraseña
+            if (!password || !userData.password) {
+                return res.status(400).json({ msg: 'Credenciales inválidas' });
+            }
             const validPassword = await bcrypt.compare(password, userData.password);
             if (!validPassword) {
                 return res.status(400).json({ msg: 'Credenciales inválidas' });
             }
         }
 
-        // Verificar si el mfaSecret está presente, solo si se requiere MFA
-        if (useMFA && !userData.mfaSecret) {
-            return res.status(400).json({ msg: 'MFA no configurado' });
-        }
+        // Generar token JWT
+        const tokenJWT = jwt.sign(
+            { email: userData.email, username: userData.username },
+            process.env.JWT_SECRET,
+            { expiresIn: '1h' }
+        );
 
-        // Verificar el código MFA (OTP), solo si se requiere MFA
-        if (useMFA) {
-            const verified = speakeasy.totp.verify({
-                secret: userData.mfaSecret,
-                encoding: 'base32',
-                token,
-            });
-
-            if (!verified) {
-                return res.status(400).json({ msg: 'Código MFA inválido' });
-            }
-        }
-
-        // Generar JWT
-        const tokenJWT = jwt.sign({ email, username: userData.username }, process.env.JWT_SECRET, {
-            expiresIn: '1h',
-        });
-
-        res.json({
-            msg: 'Inicio de sesión exitoso',
-            token: tokenJWT,
-        });
+        res.json({ msg: 'Inicio de sesión exitoso', token: tokenJWT });
     } catch (error) {
-        console.error('Error al iniciar sesión:', error.message);
-        res.status(500).json({
-            msg: 'Error en el servidor',
-            error: error.message,
-        });
+        console.error('Error en el login:', error);
+        res.status(500).json({ msg: 'Error en el servidor' });
     }
 };
-
